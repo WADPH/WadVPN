@@ -1,14 +1,18 @@
-# Private keys
+# Sensitive runtime files
 config/keys/
+config/wg0.conf
+config/clients.json
+config/port-forwards.json
+clients/
 clients/**/private.key
 
-# Generated client configs
+# Generated runtime artifacts
+generated/
 generated/client-configs/*.conf
+generated/qr/*.png
 
-# Logs
+# Logs and backups
 logs/
-
-# Backups
 backup/
 
 # Temporary files
