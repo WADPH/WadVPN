@@ -1,1 +1,20 @@
+# Private keys
 config/keys/
+clients/**/private.key
+
+# Generated client configs
+generated/client-configs/*.conf
+
+# Logs
+logs/
+
+# Backups
+backup/
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+
+# macOS
+.DS_Store
