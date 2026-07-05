@@ -1,0 +1,10 @@
+{
+  "clients": [
+    {
+      "name": "laptop",
+      "ip": "10.200.0.2",
+      "type": "client",
+      "enabled": true
+    }
+  ]
+}
