@@ -1,10 +1,28 @@
 {
-  "clients": [
-    {
-      "name": "laptop",
-      "ip": "10.200.0.2",
-      "type": "client",
-      "enabled": true
-    }
-  ]
+    "clients": [
+        {
+            "name": "laptop",
+            "enabled": true,
+            "address": "10.200.0.2",
+            "public_key": "cmzIZ6+kxV4Gxu0EXgfh1ouRJlAAIC9RLJ99rMbhNFc=",
+            "routes": []
+        },
+        {
+            "name": "mikrotik",
+            "enabled": true,
+            "address": "10.200.0.10",
+            "public_key": "H82HaOV7JPJWJ07GNnkXuuAf2rWmsscvPrlYCZQ+Wm4=",
+            "routes": [
+                "192.168.100.0/24",
+                "192.168.101.0/24"
+            ]
+        },
+        {
+            "name": "testclient",
+            "enabled": true,
+            "address": "10.200.0.11",
+            "public_key": "HPsOZt3A1SslLJHv4IeRnBjrPPO6hEF5hrpQ5cn5T1s=",
+            "routes": []
+        }
+    ]
 }

@@ -1,18 +1,22 @@
 {
     "project": {
-        "name": "WAD-VPN",
+        "name": "WadVPN",
         "version": "1.0.0"
     },
 
     "server": {
         "public_ip": "151.145.84.149",
-        "interface": "ens3",
+        "public_hostname": "vpn.wadph.top",
+        "interface": "ens3"
+    },
+
+    "wireguard": {
+        "address": "10.200.0.1/24",
         "listen_port": 51820
     },
 
     "vpn": {
         "network": "10.200.0.0/24",
-        "server_ip": "10.200.0.1",
         "dns": [
             "1.1.1.1",
             "1.0.0.1"
