@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-echo "[1/5] Checking packages..."
+echo "[1/4] Checking packages..."
 
 PACKAGES=(
     wireguard

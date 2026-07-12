@@ -1,6 +1,7 @@
 # Sensitive runtime files
+.env
 config/keys/
-config/wg0.conf
+config/*.conf
 config/clients.json
 config/port-forwards.json
 clients/

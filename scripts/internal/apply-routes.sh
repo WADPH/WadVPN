@@ -2,8 +2,12 @@
 
 set -euo pipefail
 
-CONFIG="/opt/wad-vpn/config/routes.json"
-CLIENTS_JSON="/opt/wad-vpn/config/clients.json"
+INTERNAL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$(cd "$INTERNAL_DIR/.." && pwd)"
+# shellcheck source=../lib/config.sh
+source "$SCRIPTS_DIR/lib/config.sh"
+CONFIG="$PROJECT_DIR/config/routes.json"
+CLIENTS_JSON="$PROJECT_DIR/config/clients.json"
 
 apply_route() {
     local network="$1"
@@ -22,5 +26,5 @@ done
 
 while IFS= read -r route; do
     [ -n "$route" ] || continue
-    apply_route "$route" "wg0"
+    apply_route "$route" "$WADVPN_WG_INTERFACE"
 done < <(jq -r '.clients[]? | select(.enabled == true) | .routes[]?' "$CLIENTS_JSON")

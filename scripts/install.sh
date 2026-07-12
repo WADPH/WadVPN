@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/opt/wad-vpn"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/config.sh
+source "$SCRIPT_DIR/lib/config.sh"
 
 if [ "$EUID" -ne 0 ]; then
     echo "Run this script as root."
@@ -14,12 +16,10 @@ echo "         WadVPN Installer"
 echo "========================================"
 echo
 
-"$PROJECT_DIR/scripts/install-packages.sh"
-"$PROJECT_DIR/scripts/configure-system.sh"
-"$PROJECT_DIR/scripts/apply-routes.sh"
-"$PROJECT_DIR/scripts/apply-firewall.sh"
-"$PROJECT_DIR/scripts/apply-wireguard.sh"
-"$PROJECT_DIR/scripts/verify.sh"
+"$SCRIPT_DIR/install/install-packages.sh"
+"$SCRIPT_DIR/install/configure-system.sh"
+"$SCRIPT_DIR/internal/apply-wireguard.sh"
+"$SCRIPT_DIR/verify.sh"
 
 echo
 echo "========================================"

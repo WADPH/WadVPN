@@ -2,14 +2,16 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/opt/wad-vpn"
+INTERNAL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$(cd "$INTERNAL_DIR/.." && pwd)"
+# shellcheck source=../lib/config.sh
+source "$SCRIPTS_DIR/lib/config.sh"
 CLIENTS_JSON="$PROJECT_DIR/config/clients.json"
-SETTINGS_JSON="$PROJECT_DIR/config/settings.json"
 SERVER_PRIVATE_KEY=$(cat "$PROJECT_DIR/config/keys/server_private.key")
-OUTPUT="$PROJECT_DIR/config/wg0.conf"
+OUTPUT="$PROJECT_DIR/config/$WADVPN_WG_INTERFACE.conf"
 
-SERVER_ADDRESS=$(jq -r '.wireguard.address' "$SETTINGS_JSON")
-SERVER_PORT=$(jq -r '.wireguard.listen_port' "$SETTINGS_JSON")
+SERVER_ADDRESS="$WADVPN_WG_ADDRESS"
+SERVER_PORT="$WADVPN_WG_LISTEN_PORT"
 
 cat > "$OUTPUT" <<EOF_CONF
 [Interface]

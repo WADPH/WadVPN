@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/opt/wad-vpn"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/config.sh
+source "$SCRIPT_DIR/lib/config.sh"
 FAILURES=0
 
 print_ok() {
@@ -15,16 +17,16 @@ print_fail() {
 }
 
 check_wireguard() {
-    if systemctl is-active --quiet wg-quick@wg0; then
+    if systemctl is-active --quiet "wg-quick@$WADVPN_WG_INTERFACE"; then
         print_ok "WireGuard service is active"
     else
         print_fail "WireGuard service is not active"
     fi
 
-    if ip link show wg0 >/dev/null 2>&1; then
-        print_ok "WireGuard interface wg0 exists"
+    if ip link show "$WADVPN_WG_INTERFACE" >/dev/null 2>&1; then
+        print_ok "WireGuard interface $WADVPN_WG_INTERFACE exists"
     else
-        print_fail "WireGuard interface wg0 is missing"
+        print_fail "WireGuard interface $WADVPN_WG_INTERFACE is missing"
     fi
 }
 
@@ -56,16 +58,15 @@ check_routes() {
 }
 
 check_firewall() {
-    local interface
-    interface=$(jq -r '.server.interface // "ens3"' "$PROJECT_DIR/config/settings.json")
+    local interface="$WADVPN_WAN_INTERFACE"
 
-    if iptables -C FORWARD -i wg0 -j ACCEPT >/dev/null 2>&1; then
-        print_ok "Forward rule for wg0 exists"
+    if iptables -C FORWARD -i "$WADVPN_WG_INTERFACE" -j ACCEPT >/dev/null 2>&1; then
+        print_ok "Forward rule for $WADVPN_WG_INTERFACE exists"
     else
-        print_fail "Forward rule for wg0 is missing"
+        print_fail "Forward rule for $WADVPN_WG_INTERFACE is missing"
     fi
 
-    if iptables -t nat -C POSTROUTING -s 10.200.0.0/24 -o "$interface" -j MASQUERADE >/dev/null 2>&1; then
+    if iptables -t nat -C POSTROUTING -s "$WADVPN_VPN_NETWORK" -o "$interface" -j MASQUERADE >/dev/null 2>&1; then
         print_ok "MASQUERADE rule exists"
     else
         print_fail "MASQUERADE rule is missing"
@@ -73,21 +74,21 @@ check_firewall() {
 }
 
 check_config() {
-    if [ -f "$PROJECT_DIR/config/wg0.conf" ]; then
+    if [ -f "$PROJECT_DIR/config/$WADVPN_WG_INTERFACE.conf" ]; then
         print_ok "Server config exists"
     else
         print_fail "Server config is missing"
         return
     fi
 
-    if wg-quick strip "$PROJECT_DIR/config/wg0.conf" >/dev/null 2>&1; then
+    if wg-quick strip "$PROJECT_DIR/config/$WADVPN_WG_INTERFACE.conf" >/dev/null 2>&1; then
         print_ok "Server config is syntactically valid"
     else
         print_fail "Server config validation failed"
     fi
 }
 
-echo "[5/5] Verifying installation..."
+echo "[4/4] Verifying installation..."
 check_wireguard
 check_forwarding
 check_routes

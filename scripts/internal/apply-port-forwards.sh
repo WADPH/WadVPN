@@ -2,9 +2,11 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/opt/wad-vpn"
+INTERNAL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$(cd "$INTERNAL_DIR/.." && pwd)"
+# shellcheck source=../lib/config.sh
+source "$SCRIPTS_DIR/lib/config.sh"
 CONFIG_DIR="$PROJECT_DIR/config"
-SETTINGS_JSON="$CONFIG_DIR/settings.json"
 PORT_FORWARDS_JSON="$CONFIG_DIR/port-forwards.json"
 
 if [ "$EUID" -ne 0 ]; then
@@ -12,7 +14,8 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-INTERFACE=$(jq -r '.server.interface // "ens3"' "$SETTINGS_JSON")
+INTERFACE="$WADVPN_WAN_INTERFACE"
+WG_INTERFACE="$WADVPN_WG_INTERFACE"
 
 clear_existing_forward_rules() {
     local table="$1"
@@ -47,34 +50,34 @@ clear_existing_forward_rules() {
 
 add_forward_rules() {
     local id="$1"
-    local client_address="$2"
+    local target_address="$2"
     local client_port="$3"
     local external_port="$4"
     local protocol="$5"
 
-    if ! iptables -t nat -C PREROUTING -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j DNAT --to-destination "$client_address:$client_port" -m comment --comment "$id" >/dev/null 2>&1; then
-        iptables -t nat -A PREROUTING -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j DNAT --to-destination "$client_address:$client_port" -m comment --comment "$id"
+    if ! iptables -t nat -C PREROUTING -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j DNAT --to-destination "$target_address:$client_port" -m comment --comment "$id" >/dev/null 2>&1; then
+        iptables -t nat -A PREROUTING -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j DNAT --to-destination "$target_address:$client_port" -m comment --comment "$id"
     fi
 
     if ! iptables -C INPUT -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j ACCEPT -m comment --comment "$id" >/dev/null 2>&1; then
         iptables -I INPUT 1 -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j ACCEPT -m comment --comment "$id"
     fi
 
-    if ! iptables -C FORWARD -i "$INTERFACE" -o wg0 -p "$protocol" -d "$client_address" --dport "$client_port" -j ACCEPT -m comment --comment "$id" >/dev/null 2>&1; then
-        iptables -A FORWARD -i "$INTERFACE" -o wg0 -p "$protocol" -d "$client_address" --dport "$client_port" -j ACCEPT -m comment --comment "$id"
+    if ! iptables -C FORWARD -i "$INTERFACE" -o "$WG_INTERFACE" -p "$protocol" -d "$target_address" --dport "$client_port" -j ACCEPT -m comment --comment "$id" >/dev/null 2>&1; then
+        iptables -A FORWARD -i "$INTERFACE" -o "$WG_INTERFACE" -p "$protocol" -d "$target_address" --dport "$client_port" -j ACCEPT -m comment --comment "$id"
     fi
 }
 
 remove_forward_rules() {
     local id="$1"
-    local client_address="$2"
+    local target_address="$2"
     local client_port="$3"
     local external_port="$4"
     local protocol="$5"
 
-    iptables -t nat -D PREROUTING -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j DNAT --to-destination "$client_address:$client_port" -m comment --comment "$id" 2>/dev/null || true
+    iptables -t nat -D PREROUTING -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j DNAT --to-destination "$target_address:$client_port" -m comment --comment "$id" 2>/dev/null || true
     iptables -D INPUT -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j ACCEPT -m comment --comment "$id" 2>/dev/null || true
-    iptables -D FORWARD -i "$INTERFACE" -o wg0 -p "$protocol" -d "$client_address" --dport "$client_port" -j ACCEPT -m comment --comment "$id" 2>/dev/null || true
+    iptables -D FORWARD -i "$INTERFACE" -o "$WG_INTERFACE" -p "$protocol" -d "$target_address" --dport "$client_port" -j ACCEPT -m comment --comment "$id" 2>/dev/null || true
 }
 
 main() {
@@ -96,15 +99,15 @@ main() {
         fi
     fi
 
-    while IFS=$'\t' read -r id client_address client_port external_port protocol; do
+    while IFS=$'\t' read -r id target_address client_port external_port protocol; do
         [ -n "$id" ] || continue
-        remove_forward_rules "$id" "$client_address" "$client_port" "$external_port" "$protocol"
-    done < <(jq -r '.port_forwards[]? | [.id, .client_address, (.client_port|tostring), (.external_port|tostring), .protocol] | @tsv' "$PORT_FORWARDS_JSON")
+        remove_forward_rules "$id" "$target_address" "$client_port" "$external_port" "$protocol"
+    done < <(jq -r '.port_forwards[]? | [.id, (.target_address // .client_address), (.client_port|tostring), (.external_port|tostring), .protocol] | @tsv' "$PORT_FORWARDS_JSON")
 
-    while IFS=$'\t' read -r id client_address client_port external_port protocol; do
+    while IFS=$'\t' read -r id target_address client_port external_port protocol; do
         [ -n "$id" ] || continue
-        add_forward_rules "$id" "$client_address" "$client_port" "$external_port" "$protocol"
-    done < <(jq -r '.port_forwards[]? | select(.id != null) | [.id, .client_address, (.client_port|tostring), (.external_port|tostring), .protocol] | @tsv' "$PORT_FORWARDS_JSON")
+        add_forward_rules "$id" "$target_address" "$client_port" "$external_port" "$protocol"
+    done < <(jq -r '.port_forwards[]? | select(.id != null) | [.id, (.target_address // .client_address), (.client_port|tostring), (.external_port|tostring), .protocol] | @tsv' "$PORT_FORWARDS_JSON")
 }
 
 main "$@"

@@ -25,32 +25,68 @@ WadVPN is a self-hosted WireGuard VPN management project for automating server-s
 sudo ./scripts/install.sh
 ```
 
+Before the first install, create the deployment configuration:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+# Edit .env with this server's endpoint, interfaces, and VPN network.
+```
+
+All configuration-dependent scripts load settings from `.env`. The tracked
+`.env.example` documents the required variables; `.env` is intentionally
+ignored by git.
+
+## Configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `WADVPN_PROJECT_NAME` / `WADVPN_PROJECT_VERSION` | Deployment metadata. |
+| `WADVPN_PUBLIC_HOSTNAME` | Preferred WireGuard endpoint placed in client configs. |
+| `WADVPN_PUBLIC_IP` | Endpoint fallback when no hostname is set. |
+| `WADVPN_WAN_INTERFACE` | Public interface used for NAT and port forwards. |
+| `WADVPN_WG_INTERFACE` | WireGuard interface and systemd instance name. |
+| `WADVPN_WG_ADDRESS` | Server WireGuard address with CIDR prefix. |
+| `WADVPN_WG_LISTEN_PORT` | WireGuard UDP listen port. |
+| `WADVPN_VPN_NETWORK` | Client VPN network and firewall source network. |
+| `WADVPN_DNS_SERVERS` | Comma-separated DNS servers emitted into client configs. |
+
+`WADVPN_PUBLIC_HOSTNAME` or `WADVPN_PUBLIC_IP` must be set. The current client
+address allocator supports an IPv4 `/24` VPN network.
+
 ## Main commands
 
 ```bash
-sudo ./scripts/create-client.sh <client-name> [--protected] [--isolated] [--route <network>] [--ip <address>]
-sudo ./scripts/remove-client.sh <client-name> [--force]
+sudo ./scripts/manage-clients.sh
+sudo ./scripts/manage-clients.sh add <client-name> [--protected] [--isolated] [--route <network>] [--ip <address>]
+sudo ./scripts/manage-clients.sh remove <client-name> [--force] [--yes]
+sudo ./scripts/manage-clients.sh --help
 sudo ./scripts/manage-port-forward.sh list
-sudo ./scripts/manage-port-forward.sh add <client-name>
+sudo ./scripts/manage-port-forward.sh add <client-name> --protocol <tcp|udp> --external-port <port> --target-port <port> [--target-address <ip>]
 sudo ./scripts/manage-port-forward.sh remove
+sudo ./scripts/manage-port-forward.sh --help
 sudo ./scripts/verify.sh
 ```
 
 ## Project layout
 
 ```text
-/opt/wad-vpn
+<project-root>
 ├── clients/              # Per-client working directory with keys
 ├── config/               # Main configuration and runtime state
 │   ├── clients.json      # Source of truth for clients
-│   ├── settings.json     # Server and VPN settings
 │   ├── routes.json       # Static routes
 │   ├── keys/             # Server key material (ignored by git)
 │   └── port-forwards.json# Port-forward definitions
 ├── generated/            # Generated client configs and QR files (ignored by git)
 ├── logs/                 # Runtime logs (ignored by git)
-├── scripts/              # Automation scripts
+├── scripts/              # Runtime commands and main installer
+│   ├── install/          # Internal scripts used only during installation
+│   ├── internal/         # Internal apply/generation steps
+│   └── lib/              # Shared configuration loader
 ├── backup/               # Backup directory (ignored by git)
+├── .env                  # Deployment configuration (ignored by git)
+├── .env.example          # Documented configuration template
 └── templates/            # Currently empty placeholder folder
 ```
 
@@ -58,18 +94,19 @@ sudo ./scripts/verify.sh
 
 These are the main runtime and automation files in the current workflow:
 
-- [scripts/create-client.sh](scripts/create-client.sh) — creates clients end to end
-- [scripts/remove-client.sh](scripts/remove-client.sh) — removes clients and related artifacts
+Public commands:
+
+- [scripts/manage-clients.sh](scripts/manage-clients.sh) — interactive and flag-driven client creation/removal
 - [scripts/manage-port-forward.sh](scripts/manage-port-forward.sh) — adds/removes port forwards
-- [scripts/apply-port-forwards.sh](scripts/apply-port-forwards.sh) — applies iptables rules for forwards
-- [scripts/apply-wireguard.sh](scripts/apply-wireguard.sh) — regenerates and reloads WireGuard
-- [scripts/generate-server-config.sh](scripts/generate-server-config.sh) — writes the server WireGuard config
-- [scripts/apply-routes.sh](scripts/apply-routes.sh) — applies static and client routes
-- [scripts/apply-firewall.sh](scripts/apply-firewall.sh) — applies VPN firewall rules
 - [scripts/install.sh](scripts/install.sh) — main installer entrypoint
 - [scripts/verify.sh](scripts/verify.sh) — post-install verification
+
+Internal implementation scripts:
+
+- [scripts/install](scripts/install) — package and system setup helpers for the installer
+- [scripts/internal](scripts/internal) — WireGuard config generation and application of firewall, routes, and port forwards
 - [config/clients.json](config/clients.json) — client registry
-- [config/settings.json](config/settings.json) — server settings
+- [.env.example](.env.example) — required server and VPN setting template
 - [config/routes.json](config/routes.json) — static routes
 - [config/port-forwards.json](config/port-forwards.json) — current port-forward state
 
@@ -88,6 +125,7 @@ The repository now ignores the sensitive runtime files that should not be commit
 - generated WireGuard config with private material
 - generated client configs and QR images
 - logs and temporary files
+- deployment-specific `.env` settings
 
 The test workflow intentionally avoids touching the protected clients PocoF5 and Mikrotik.
 
