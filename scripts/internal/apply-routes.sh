@@ -14,7 +14,6 @@ apply_route() {
     local interface="$2"
 
     echo "Applying route: $network via $interface"
-    ip route del "$network" dev "$interface" 2>/dev/null || true
     ip route replace "$network" dev "$interface"
 }
 

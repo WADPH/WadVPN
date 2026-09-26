@@ -8,6 +8,10 @@ WadVPN is a self-hosted WireGuard VPN management project for automating server-s
 - Generates client config files and QR images
 - Applies routes and firewall rules
 - Supports protected clients and client groups (clients see each other only inside a shared group)
+- Enables and disables clients without deleting them
+- Adds and removes clients without disconnecting the others
+- Rotates the server key pair and rebuilds all client configs
+- Restores the firewall at boot before WireGuard starts
 - Manages per-client TCP/UDP port forwards
 - Verifies the resulting setup
 
@@ -61,6 +65,10 @@ address allocator supports an IPv4 `/24` VPN network.
 sudo ./scripts/manage-clients.sh
 sudo ./scripts/manage-clients.sh add <client-name> [--protected] [--group <group>]... [--route <network>] [--ip <address>]
 sudo ./scripts/manage-clients.sh remove <client-name> [--force] [--yes]
+sudo ./scripts/manage-clients.sh list
+sudo ./scripts/manage-clients.sh enable|disable <client-name>
+sudo ./scripts/manage-clients.sh show-config <client-name>
+sudo ./scripts/manage-clients.sh rotate-server-key [--yes]
 sudo ./scripts/manage-clients.sh group list
 sudo ./scripts/manage-clients.sh group create|rename|delete ...
 sudo ./scripts/manage-clients.sh group add-client|remove-client|move-client ...
@@ -87,6 +95,31 @@ and routed networks, and the `WADVPN-C2C` iptables chain accepts traffic only
 when source and destination are in the same set. Membership changes only
 reload the firewall; WireGuard is not restarted.
 
+## How changes are applied
+
+- Adding, removing, enabling, or disabling a client updates the running
+  interface with `wg syncconf`, so other clients stay connected.
+- `wadvpn-firewall.service` (installed by `install.sh`) rebuilds the firewall,
+  groups, and port forwards at boot, before `wg-quick@<interface>`. WireGuard
+  does not start when the firewall fails, so clients are never connected
+  without the group filter. Static routes from `config/routes.json` are
+  applied by `PostUp` in the generated server config.
+- Client configs send both `0.0.0.0/0` and `::/0` into the tunnel. The server
+  accepts only IPv4 from peers, so IPv6 traffic is dropped instead of leaking
+  outside the VPN.
+- Port forwards store the client name only. The target defaults to the
+  client's current VPN address, looked up whenever rules are applied, and
+  forwards of disabled clients are skipped.
+
+## Rotating the server key
+
+`manage-clients.sh rotate-server-key` backs up the current keys, server config,
+and generated client files to `backup/server-key-rotation-<timestamp>/`,
+generates a new key pair, applies it, and rebuilds every client config and QR.
+Clients keep their own keys; each one only needs the new server public key in
+the `PublicKey` line of its `[Peer]` section. Clients disconnect until they are
+updated.
+
 ## Project layout
 
 ```text
@@ -102,11 +135,10 @@ reload the firewall; WireGuard is not restarted.
 ├── scripts/              # Runtime commands and main installer
 │   ├── install/          # Internal scripts used only during installation
 │   ├── internal/         # Internal apply/generation steps
-│   └── lib/              # Shared configuration loader
-├── backup/               # Backup directory (ignored by git)
+│   └── lib/              # Shared configuration, registry, and IPv4 helpers
+├── backup/               # Automatic backups before key rotation (ignored by git)
 ├── .env                  # Deployment configuration (ignored by git)
-├── .env.example          # Documented configuration template
-└── templates/            # Currently empty placeholder folder
+└── .env.example          # Documented configuration template
 ```
 
 ## Files that are actively used
@@ -115,7 +147,7 @@ These are the main runtime and automation files in the current workflow:
 
 Public commands:
 
-- [scripts/manage-clients.sh](scripts/manage-clients.sh) — interactive and flag-driven client creation/removal
+- [scripts/manage-clients.sh](scripts/manage-clients.sh) — clients, groups, configs and QR codes, server key rotation
 - [scripts/manage-port-forward.sh](scripts/manage-port-forward.sh) — adds/removes port forwards
 - [scripts/install.sh](scripts/install.sh) — main installer entrypoint
 - [scripts/verify.sh](scripts/verify.sh) — post-install verification
@@ -128,12 +160,6 @@ Internal implementation scripts:
 - [.env.example](.env.example) — required server and VPN setting template
 - [config/routes.json](config/routes.json) — static routes
 - [config/port-forwards.json](config/port-forwards.json) — current port-forward state
-
-## Files that are effectively placeholders or not used in the current flow
-
-- [templates](templates) — currently empty, no active templates are referenced by the scripts
-- [backup](backup) — present for manual backup use; not used by the automation scripts
-- [config/firewall.json](config/firewall.json) — present but not consumed by the current active scripts
 
 ## Security and git hygiene
 

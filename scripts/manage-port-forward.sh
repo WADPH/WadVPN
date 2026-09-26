@@ -7,6 +7,15 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG_DIR="$PROJECT_DIR/config"
 CLIENTS_JSON="$CONFIG_DIR/clients.json"
 PORT_FORWARDS_JSON="$CONFIG_DIR/port-forwards.json"
+# shellcheck source=lib/net.sh
+source "$SCRIPT_DIR/lib/net.sh"
+
+# Resolves each forward's target: an explicit target address, otherwise the
+# client's current VPN address.
+FORWARD_TARGETS_JQ='($registry[0].clients // []) as $clients
+    | .port_forwards[]? | select(.id != null) | . as $forward
+    | ([$clients[] | select(.name == $forward.client_name)][0]) as $client
+    | . + {target: (.target_address // $client.address // "unknown")}'
 
 usage() {
     cat <<'EOF'
@@ -20,7 +29,8 @@ Add options:
   --protocol <tcp|udp>        Protocol for the external port.
   --external-port <1-65535>   Public port on the VPN server.
   --target-port <1-65535>     Port on the target host.
-  --target-address <IPv4>     Target host address. Defaults to the client VPN IP.
+  --target-address <IPv4>     Target host address. Defaults to the client VPN IP,
+                              which is looked up whenever rules are applied.
                               It may also be an IPv4 address inside a route
                               announced by the selected client.
 
@@ -44,7 +54,7 @@ require_root() {
 
 list_clients() {
     echo "Available clients:"
-    jq -r '.clients[]? | [.name, .address, ((.enabled // true)|tostring), ([.routes[]?] | join(", "))] | @tsv' "$CLIENTS_JSON" | nl -ba | sed 's/\t/  /g'
+    jq -r '.clients[]? | [.name, .address, ((.enabled != false)|tostring), ([.routes[]?] | join(", "))] | @tsv' "$CLIENTS_JSON" | nl -ba | sed 's/\t/  /g'
 }
 
 list_forwards() {
@@ -52,7 +62,7 @@ list_forwards() {
     local count
     count=$(jq '[.port_forwards[]? | select(.id != null)] | length' "$PORT_FORWARDS_JSON")
     if [ "$count" -gt 0 ]; then
-        jq -r '.port_forwards[]? | select(.id != null) | ["ID=\(.id)", "Client=\(.client_name)", "Proto=\(.protocol)", "External=\(.external_port)", "Target=\(.target_address // .client_address):\(.client_port)"] | @tsv' "$PORT_FORWARDS_JSON"
+        jq -r --slurpfile registry "$CLIENTS_JSON" "$FORWARD_TARGETS_JQ"' | ["ID=\(.id)", "Client=\(.client_name)", "Proto=\(.protocol)", "External=\(.external_port)", "Target=\(.target):\(.client_port)"] | @tsv' "$PORT_FORWARDS_JSON"
     else
         echo "  (none)"
     fi
@@ -63,7 +73,7 @@ list_forward_choices() {
     local count
     count=$(jq '[.port_forwards[]? | select(.id != null)] | length' "$PORT_FORWARDS_JSON")
     if [ "$count" -gt 0 ]; then
-        jq -r '.port_forwards[]? | select(.id != null) | [.id, .client_name, .protocol, (.external_port|tostring), (.target_address // .client_address), (.client_port|tostring)] | @tsv' "$PORT_FORWARDS_JSON" | nl -ba | sed 's/\t/  /g'
+        jq -r --slurpfile registry "$CLIENTS_JSON" "$FORWARD_TARGETS_JQ"' | [.id, .client_name, .protocol, (.external_port|tostring), .target, (.client_port|tostring)] | @tsv' "$PORT_FORWARDS_JSON" | nl -ba | sed 's/\t/  /g'
     else
         echo "  (none)"
     fi
@@ -85,39 +95,6 @@ resolve_forward_id() {
     else
         echo "$selection"
     fi
-}
-
-valid_ipv4() {
-    local address="$1"
-    [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
-    local octet
-    IFS='.' read -r -a octets <<< "$address"
-    for octet in "${octets[@]}"; do
-        [ "$octet" -ge 0 ] && [ "$octet" -le 255 ] || return 1
-    done
-}
-
-ipv4_to_int() {
-    local address="$1" a b c d
-    IFS='.' read -r a b c d <<< "$address"
-    echo $((10#$a * 16777216 + 10#$b * 65536 + 10#$c * 256 + 10#$d))
-}
-
-cidr_contains() {
-    local cidr="$1" address="$2" network prefix mask network_int address_int
-    [[ "$cidr" == */* ]] || return 1
-    network="${cidr%/*}"
-    prefix="${cidr#*/}"
-    valid_ipv4 "$network" && valid_ipv4 "$address" || return 1
-    [[ "$prefix" =~ ^[0-9]+$ ]] && [ "$prefix" -ge 0 ] && [ "$prefix" -le 32 ] || return 1
-    network_int=$(ipv4_to_int "$network")
-    address_int=$(ipv4_to_int "$address")
-    if [ "$prefix" -eq 0 ]; then
-        mask=0
-    else
-        mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
-    fi
-    (( (network_int & mask) == (address_int & mask) ))
 }
 
 validate_target_address() {
@@ -154,8 +131,11 @@ add_forward() {
     [ "$protocol" = tcp ] || [ "$protocol" = udp ] || { echo "Unsupported protocol: $protocol" >&2; return 1; }
     validate_port "External port" "$external_port"
     validate_port "Target port" "$client_port"
-    [ -n "$target_address" ] || target_address="$client_address"
-    validate_target_address "$client_name" "$client_address" "$target_address"
+    local target_json=null
+    if [ -n "$target_address" ] && [ "$target_address" != "$client_address" ]; then
+        validate_target_address "$client_name" "$client_address" "$target_address"
+        target_json="\"$target_address\""
+    fi
 
     if jq -e --arg protocol "$protocol" --argjson external_port "$external_port" '.port_forwards[]? | select(.id != null and .protocol == $protocol and .external_port == $external_port)' "$PORT_FORWARDS_JSON" >/dev/null 2>&1; then
         echo "External port already in use for protocol $protocol: $external_port" >&2
@@ -170,11 +150,11 @@ add_forward() {
 
     local tmp
     tmp=$(mktemp)
-    jq --arg id "$id" --arg client_name "$client_name" --arg client_address "$client_address" --arg target_address "$target_address" --argjson external_port "$external_port" --argjson client_port "$client_port" --arg protocol "$protocol" '.port_forwards += [{"id": $id, "client_name": $client_name, "client_address": $client_address, "target_address": $target_address, "external_port": $external_port, "client_port": $client_port, "protocol": $protocol, "enabled": true}]' "$PORT_FORWARDS_JSON" > "$tmp"
+    jq --arg id "$id" --arg client_name "$client_name" --argjson target_address "$target_json" --argjson external_port "$external_port" --argjson client_port "$client_port" --arg protocol "$protocol" '.port_forwards += [{"id": $id, "client_name": $client_name, "external_port": $external_port, "client_port": $client_port, "protocol": $protocol, "enabled": true} + (if $target_address then {"target_address": $target_address} else {} end)]' "$PORT_FORWARDS_JSON" > "$tmp"
     mv "$tmp" "$PORT_FORWARDS_JSON"
 
     "$SCRIPT_DIR/internal/apply-port-forwards.sh"
-    echo "Port forward added: $id ($protocol $external_port -> $target_address:$client_port)"
+    echo "Port forward added: $id ($protocol $external_port -> ${target_address:-$client_address}:$client_port)"
 }
 
 add_forward_interactive() {

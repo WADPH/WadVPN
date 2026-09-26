@@ -23,16 +23,14 @@ fi
 mkdir -p /etc/wireguard
 ln -sfn "$CONFIG_PATH" "/etc/wireguard/$WADVPN_WG_INTERFACE.conf"
 
-if ip link show "$WADVPN_WG_INTERFACE" >/dev/null 2>&1; then
-    wg-quick down "$WADVPN_WG_INTERFACE" >/dev/null 2>&1 || true
-fi
-
 if ! systemctl is-enabled "wg-quick@$WADVPN_WG_INTERFACE" >/dev/null 2>&1; then
     systemctl enable "wg-quick@$WADVPN_WG_INTERFACE" >/dev/null
 fi
 
-if systemctl is-active --quiet "wg-quick@$WADVPN_WG_INTERFACE"; then
-    systemctl restart "wg-quick@$WADVPN_WG_INTERFACE" >/dev/null
+# A running interface is updated in place, so only added, removed, or changed
+# peers are affected and every other client stays connected.
+if ip link show "$WADVPN_WG_INTERFACE" >/dev/null 2>&1; then
+    wg syncconf "$WADVPN_WG_INTERFACE" <(wg-quick strip "$CONFIG_PATH")
 else
     systemctl start "wg-quick@$WADVPN_WG_INTERFACE" >/dev/null
 fi

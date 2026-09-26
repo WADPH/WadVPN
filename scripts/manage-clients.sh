@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/config.sh"
 # shellcheck source=lib/clients.sh
 source "$SCRIPT_DIR/lib/clients.sh"
+# shellcheck source=lib/net.sh
+source "$SCRIPT_DIR/lib/net.sh"
 
 CLIENTS_DIR="$PROJECT_DIR/clients"
 CONFIG_DIR="$PROJECT_DIR/config"
@@ -22,13 +24,24 @@ Usage:
   manage-clients.sh add <name> [options]    Create a client.
   manage-clients.sh remove <name> [options] Remove a client.
   manage-clients.sh list                    List registered clients.
+  manage-clients.sh enable <name>           Allow a disabled client to connect.
+  manage-clients.sh disable <name>          Block a client without deleting it.
+  manage-clients.sh show-config <name>      Regenerate and show config and QR.
   manage-clients.sh group <command> ...     Manage client groups.
+  manage-clients.sh rotate-server-key       Replace the server key pair.
 
 Commands:
   add, create       Create a new client. "create" is an alias for "add".
   remove, delete    Remove a client. "delete" is an alias for "remove".
   list              Show client names, addresses, protection, and groups.
+  enable, disable   Turn a client on or off. A disabled client keeps its keys,
+                    groups, and port forwards but cannot connect.
+  show-config       Rebuild the client config and QR from current settings,
+                    then print both.
   group, groups     Manage groups (see below). "groups" alone lists them.
+  rotate-server-key Generate a new server key pair, apply it, and rebuild all
+                    client configs. Every client must then update the server
+                    public key. Use --yes to skip the confirmation.
 
 Clients can reach each other only when they share at least one group.
 A client without groups is isolated from all other VPN clients.
@@ -42,14 +55,16 @@ Group commands:
   group remove-client <group> <client>      Remove a client from a group.
   group move-client <client> <from> <to>    Move a client between groups.
 
-Group names use letters, digits, "_" and "-", up to 22 characters.
+Client names start with a letter or digit and use letters, digits, ".", "_"
+and "-", up to 32 characters. Group names use letters, digits, "_" and "-",
+up to 22 characters.
 
 Add options:
   --protected       Mark the client as protected from normal removal.
   --group <name>    Add the client to an existing group; can be repeated.
                     Without --group the client is isolated.
   --route <CIDR>    Route a network through this client; can be repeated.
-  --ip <IPv4>       Assign a specific client IPv4 address.
+  --ip <IPv4>       Assign a specific address inside the VPN network.
 
 Remove options:
   --force           Allow removal of a protected client.
@@ -63,6 +78,8 @@ Examples:
   sudo ./scripts/manage-clients.sh add router --protected --route 192.168.50.0/24
   sudo ./scripts/manage-clients.sh remove laptop --yes
   sudo ./scripts/manage-clients.sh remove router --force --yes
+  sudo ./scripts/manage-clients.sh disable laptop
+  sudo ./scripts/manage-clients.sh show-config laptop
   sudo ./scripts/manage-clients.sh group create office
   sudo ./scripts/manage-clients.sh group move-client laptop home office
 EOF
@@ -88,7 +105,7 @@ list_clients() {
         [ "$protected" = "true" ] && protected="yes" || protected="no"
         printf '  %2s  %-12s  %-15s  %-7s  %-9s  %s\n' "$idx" "$name" "$address" "$enabled" "$protected" "$(format_groups <<< "$groups")"
         idx=$((idx + 1))
-    done < <(jq -r '.clients[]? | [.name, .address, ((.enabled // true)|tostring), ((.protected // false)|tostring), ((.groups // [])|tojson)] | @tsv' "$CLIENTS_JSON")
+    done < <(jq -r '.clients[]? | [.name, .address, ((.enabled != false)|tostring), ((.protected // false)|tostring), ((.groups // [])|tojson)] | @tsv' "$CLIENTS_JSON")
 }
 
 resolve_client_name() {
@@ -100,6 +117,110 @@ resolve_client_name() {
     fi
 }
 
+require_valid_client_name() {
+    valid_client_name "$1" && return 0
+    echo "Invalid client name: $1 (start with a letter or digit; use letters, digits, ., _ and -, up to 32 characters)" >&2
+    return 1
+}
+
+server_address() {
+    echo "${WADVPN_WG_ADDRESS%/*}"
+}
+
+address_in_use() {
+    jq -e --arg addr "$1" '.clients[]? | select(.address == $addr)' "$CLIENTS_JSON" >/dev/null 2>&1
+}
+
+# The allocator hands out host addresses of the /24 VPN network, skipping the
+# server address and addresses already assigned.
+allocate_address() {
+    local vpn_prefix candidate host
+    vpn_prefix=$(echo "${WADVPN_VPN_NETWORK%/*}" | awk -F. '{print $1"."$2"."$3}')
+    for host in $(seq 2 254); do
+        candidate="$vpn_prefix.$host"
+        [ "$candidate" != "$(server_address)" ] || continue
+        address_in_use "$candidate" && continue
+        echo "$candidate"
+        return 0
+    done
+    echo "No free address left in $WADVPN_VPN_NETWORK." >&2
+    return 1
+}
+
+validate_client_address() {
+    local address="$1" prefix network_int broadcast_int address_int
+    if ! valid_ipv4 "$address" || ! cidr_contains "$WADVPN_VPN_NETWORK" "$address"; then
+        echo "Address must be an IPv4 address inside $WADVPN_VPN_NETWORK: $address" >&2
+        return 1
+    fi
+    prefix="${WADVPN_VPN_NETWORK#*/}"
+    network_int=$(ipv4_to_int "${WADVPN_VPN_NETWORK%/*}")
+    broadcast_int=$(( network_int | ((1 << (32 - prefix)) - 1) ))
+    address_int=$(ipv4_to_int "$address")
+    if [ "$address_int" -eq "$network_int" ] || [ "$address_int" -eq "$broadcast_int" ]; then
+        echo "Address is the network or broadcast address: $address" >&2
+        return 1
+    fi
+    if [ "$address" = "$(server_address)" ]; then
+        echo "Address belongs to the VPN server: $address" >&2
+        return 1
+    fi
+    if address_in_use "$address"; then
+        echo "IP address already in use: $address" >&2
+        return 1
+    fi
+}
+
+# Writes the client config and QR image from the registry, the client's own
+# private key, and the current server public key.
+write_client_files() {
+    local client_name="$1"
+    local private_key_path="$CLIENTS_DIR/$client_name/private.key"
+    if [ ! -f "$private_key_path" ]; then
+        echo "Private key not found for client '$client_name': $private_key_path" >&2
+        return 1
+    fi
+
+    local client_address config_path
+    client_address=$(jq -r --arg name "$client_name" '.clients[] | select(.name == $name) | .address' "$CLIENTS_JSON")
+    config_path="$CLIENT_CONFIGS_DIR/$client_name.conf"
+    mkdir -p "$CLIENT_CONFIGS_DIR" "$QR_DIR"
+
+    # ::/0 sends IPv6 into the tunnel too.  The server accepts only IPv4 from
+    # peers, so IPv6 is dropped there instead of leaking outside the VPN.
+    (
+        umask 077
+        cat > "$config_path" <<EOF_CONFIG
+[Interface]
+PrivateKey = $(cat "$private_key_path")
+Address = $client_address/${WADVPN_VPN_NETWORK#*/}
+DNS = ${WADVPN_DNS_SERVERS//,/, }
+
+[Peer]
+PublicKey = $(cat "$CONFIG_DIR/keys/server_public.key")
+Endpoint = $WADVPN_ENDPOINT:$WADVPN_WG_LISTEN_PORT
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF_CONFIG
+        qrencode -t PNG -o "$QR_DIR/$client_name.png" < "$config_path"
+    )
+}
+
+print_client_files() {
+    local client_name="$1"
+    local config_path="$CLIENT_CONFIGS_DIR/$client_name.conf"
+    echo "Config     : $config_path"
+    echo "QR PNG     : $QR_DIR/$client_name.png"
+    echo
+    echo "To download the config from the server:"
+    echo "  scp root@$(hostname -I | awk '{print $1}'):$config_path ./"
+    echo
+    cat "$config_path"
+    echo
+    echo "ASCII QR:"
+    qrencode -t ANSIUTF8 < "$config_path"
+}
+
 create_client() {
     local client_name="$1"
     local protected="$2"
@@ -108,6 +229,7 @@ create_client() {
     shift 4
     local routes=("$@")
 
+    require_valid_client_name "$client_name" || return 1
     if client_exists "$client_name"; then
         echo "Client already exists." >&2
         return 1
@@ -118,42 +240,30 @@ create_client() {
         require_group "$group" || return 1
     done < <(jq -r '.[]' <<< "$groups_json")
 
-    local vpn_prefix cidr used_ips next_ip routes_json public_key server_public_key
-    vpn_prefix=$(echo "$WADVPN_VPN_NETWORK" | awk -F. '{print $1"."$2"."$3}')
-    cidr=$(echo "$WADVPN_VPN_NETWORK" | awk -F/ '{print $2}')
+    local route valid_routes=()
+    for route in "${routes[@]}"; do
+        route="${route// /}"
+        [ -n "$route" ] || continue
+        valid_ipv4_cidr "$route" || { echo "Invalid route (expected IPv4 CIDR such as 192.168.50.0/24): $route" >&2; return 1; }
+        valid_routes+=("$route")
+    done
 
     if [ -z "$client_address" ]; then
-        used_ips=$(jq -r '.clients[]?.address // empty' "$CLIENTS_JSON" | awk -F. '{print $4}' | sort -n)
-        next_ip=2
-        while echo "$used_ips" | grep -q "^$next_ip$"; do
-            next_ip=$((next_ip + 1))
-        done
-        client_address="$vpn_prefix.$next_ip"
+        client_address=$(allocate_address) || return 1
     else
-        if ! echo "$client_address" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
-            echo "Invalid IP address: $client_address" >&2
-            return 1
-        fi
-        if jq -e --arg addr "$client_address" '.clients[]? | select(.address == $addr)' "$CLIENTS_JSON" >/dev/null 2>&1; then
-            echo "IP address already in use: $client_address" >&2
-            return 1
-        fi
+        validate_client_address "$client_address" || return 1
     fi
 
-    if [ ${#routes[@]} -eq 0 ]; then
-        routes_json='[]'
-    else
-        routes_json=$(printf '%s\n' "${routes[@]}" | jq -R . | jq -s -c '.')
-    fi
+    local routes_json public_key
+    routes_json=$(to_json_array "${valid_routes[@]}")
     local client_dir="$CLIENTS_DIR/$client_name"
-    mkdir -p "$client_dir" "$CLIENT_CONFIGS_DIR" "$QR_DIR"
+    mkdir -p "$client_dir"
 
-    umask 077
-    wg genkey | tee "$client_dir/private.key" | wg pubkey > "$client_dir/public.key"
-    chmod 600 "$client_dir/private.key" "$client_dir/public.key"
-
+    (
+        umask 077
+        wg genkey | tee "$client_dir/private.key" | wg pubkey > "$client_dir/public.key"
+    )
     public_key=$(cat "$client_dir/public.key")
-    server_public_key=$(cat "$CONFIG_DIR/keys/server_public.key")
 
     update_clients_json \
         --arg name "$client_name" \
@@ -173,43 +283,23 @@ create_client() {
         }]'
 
     "$SCRIPT_DIR/internal/apply-wireguard.sh"
-
-    local client_config_path="$CLIENT_CONFIGS_DIR/$client_name.conf"
-    local dns_servers="${WADVPN_DNS_SERVERS//,/\, }"
-    cat > "$client_config_path" <<EOF_CONFIG
-[Interface]
-PrivateKey = $(cat "$client_dir/private.key")
-Address = $client_address/$cidr
-DNS = $dns_servers
-
-[Peer]
-PublicKey = $server_public_key
-Endpoint = $WADVPN_ENDPOINT:$WADVPN_WG_LISTEN_PORT
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-EOF_CONFIG
-
-    local qr_path="$QR_DIR/$client_name.png"
-    qrencode -t PNG -o "$qr_path" < "$client_config_path"
+    write_client_files "$client_name"
 
     echo "Client created successfully."
     echo "Name       : $client_name"
     echo "IP         : $client_address"
     echo "Protected  : $protected"
     echo "Groups     : $(format_groups <<< "$groups_json")"
-    echo "Routes     : ${routes[*]:-none}"
-    echo "Config     : $client_config_path"
-    echo "QR PNG     : $qr_path"
-    echo
-    echo "To view the client config:"
-    echo "  cat $client_config_path"
-    echo "To download the config from the server:"
-    echo "  scp root@$(hostname -I | awk '{print $1}'):$client_config_path ./"
-    echo "To view the QR in terminal:"
-    echo "  qrencode -t ANSIUTF8 < $client_config_path"
-    echo
-    echo "ASCII QR:"
-    qrencode -t ANSIUTF8 "$client_config_path"
+    echo "Routes     : ${valid_routes[*]:-none}"
+    print_client_files "$client_name"
+}
+
+delete_client_routes() {
+    local route
+    while IFS= read -r route; do
+        [ -n "$route" ] || continue
+        ip route del "$route" dev "$WADVPN_WG_INTERFACE" 2>/dev/null || true
+    done < <(jq -r --arg name "$1" '.clients[]? | select(.name == $name) | .routes[]?' "$CLIENTS_JSON")
 }
 
 remove_client() {
@@ -217,10 +307,10 @@ remove_client() {
     local force="$2"
     local assume_yes="$3"
 
-    if ! jq -e --arg name "$client_name" '.clients[]? | select(.name == $name)' "$CLIENTS_JSON" >/dev/null 2>&1; then
-        echo "Client not found: $client_name" >&2
-        return 1
-    fi
+    require_client "$client_name" || return 1
+    # The name becomes part of the paths removed below; never trust a
+    # hand-edited registry.
+    require_valid_client_name "$client_name" || return 1
 
     if [ "$(jq -r --arg name "$client_name" '.clients[]? | select(.name == $name) | (.protected // false)' "$CLIENTS_JSON")" = "true" ] && [ "$force" != true ]; then
         echo "Protected client cannot be removed: $client_name" >&2
@@ -237,34 +327,114 @@ remove_client() {
         fi
     fi
 
-    while IFS= read -r route; do
-        [ -n "$route" ] || continue
-        ip route del "$route" dev "$WADVPN_WG_INTERFACE" 2>/dev/null || true
-    done < <(jq -r --arg name "$client_name" '.clients[]? | select(.name == $name) | .routes[]?' "$CLIENTS_JSON")
+    delete_client_routes "$client_name"
+    update_clients_json --arg name "$client_name" '.clients |= map(select(.name != $name))'
 
-    local tmp
-    tmp=$(mktemp)
-    jq --arg name "$client_name" '.clients |= map(select(.name != $name))' "$CLIENTS_JSON" > "$tmp"
-    mv "$tmp" "$CLIENTS_JSON"
-
-    rm -rf "$CLIENTS_DIR/$client_name"
-    rm -f "$CLIENT_CONFIGS_DIR/$client_name.conf"
-    rm -f "$QR_DIR/$client_name.png"
+    rm -rf "${CLIENTS_DIR:?}/${client_name:?}"
+    rm -f "${CLIENT_CONFIGS_DIR:?}/${client_name:?}.conf"
+    rm -f "${QR_DIR:?}/${client_name:?}.png"
 
     if [ -f "$PORT_FORWARDS_JSON" ]; then
-        local removed_forwards
+        local removed_forwards tmp
         removed_forwards=$(jq -c --arg name "$client_name" '[.port_forwards[]? | select(.client_name == $name)]' "$PORT_FORWARDS_JSON")
         if [ "$removed_forwards" != "[]" ]; then
-            tmp=$(mktemp)
+            tmp=$(mktemp "$PORT_FORWARDS_JSON.XXXXXX")
             jq --arg name "$client_name" '.port_forwards |= map(select(.client_name != $name))' "$PORT_FORWARDS_JSON" > "$tmp"
+            chmod --reference="$PORT_FORWARDS_JSON" "$tmp"
+            chown --reference="$PORT_FORWARDS_JSON" "$tmp" 2>/dev/null || true
             mv "$tmp" "$PORT_FORWARDS_JSON"
             echo "Removed port forwards for client '$client_name':"
-            echo "$removed_forwards" | jq -r '.[] | "  - \(.id) \(.protocol) \(.external_port) -> \(.client_address):\(.client_port)"'
+            echo "$removed_forwards" | jq -r '.[] | "  - \(.id) \(.protocol) \(.external_port) -> port \(.client_port)"'
         fi
     fi
 
     "$SCRIPT_DIR/internal/apply-wireguard.sh"
     echo "Client removed: $client_name"
+}
+
+set_client_enabled() {
+    local client_name="$1" enabled="$2"
+    require_client "$client_name" || return 1
+    if jq -e --arg name "$client_name" --argjson enabled "$enabled" '.clients[] | select(.name == $name) | (.enabled != false) == $enabled' "$CLIENTS_JSON" >/dev/null; then
+        echo "Client '$client_name' is already $([ "$enabled" = true ] && echo enabled || echo disabled)."
+        return 0
+    fi
+
+    [ "$enabled" = true ] || delete_client_routes "$client_name"
+    update_clients_json --arg name "$client_name" --argjson enabled "$enabled" '
+        .clients |= map(if .name == $name then .enabled = $enabled else . end)'
+    "$SCRIPT_DIR/internal/apply-wireguard.sh"
+    if [ "$enabled" = true ]; then
+        echo "Client enabled: $client_name"
+    else
+        echo "Client disabled: $client_name (keys, groups, and port forwards are kept)"
+    fi
+}
+
+show_client_config() {
+    local client_name="$1"
+    require_client "$client_name" || return 1
+    require_valid_client_name "$client_name" || return 1
+    write_client_files "$client_name"
+    if jq -e --arg name "$client_name" '.clients[] | select(.name == $name) | (.enabled != false) | not' "$CLIENTS_JSON" >/dev/null; then
+        echo "Note: client '$client_name' is disabled and cannot connect until it is enabled."
+    fi
+    print_client_files "$client_name"
+}
+
+# Replaces the server key pair.  Peers keep their own keys, so only the server
+# public key in each client config changes.  Connected clients drop off until
+# they are updated.
+rotate_server_key() {
+    local assume_yes="$1"
+    local keys_dir="$CONFIG_DIR/keys"
+
+    if [ "$assume_yes" != true ]; then
+        local confirm
+        echo "All clients will disconnect until their configs use the new server public key."
+        read -r -p "Rotate the server key now? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; return 0; }
+    fi
+
+    local backup_dir old_public new_public
+    backup_dir="$PROJECT_DIR/backup/server-key-rotation-$(date +%Y%m%d%H%M%S)"
+    (
+        umask 077
+        mkdir -p "$backup_dir"
+        cp -p "$keys_dir/server_private.key" "$keys_dir/server_public.key" "$backup_dir/"
+        [ ! -f "$CONFIG_DIR/$WADVPN_WG_INTERFACE.conf" ] || cp -p "$CONFIG_DIR/$WADVPN_WG_INTERFACE.conf" "$backup_dir/"
+        [ ! -d "$GENERATED_DIR" ] || cp -rp "$GENERATED_DIR" "$backup_dir/generated"
+
+        wg genkey > "$keys_dir/server_private.key.new"
+        wg pubkey < "$keys_dir/server_private.key.new" > "$keys_dir/server_public.key.new"
+        mv "$keys_dir/server_private.key.new" "$keys_dir/server_private.key"
+        mv "$keys_dir/server_public.key.new" "$keys_dir/server_public.key"
+    )
+    old_public=$(cat "$backup_dir/server_public.key")
+    new_public=$(cat "$keys_dir/server_public.key")
+
+    "$SCRIPT_DIR/internal/apply-wireguard.sh"
+
+    local client_name failed=()
+    echo "Rebuilt client configs:"
+    while IFS= read -r client_name; do
+        if valid_client_name "$client_name" && write_client_files "$client_name"; then
+            echo "  $client_name: $CLIENT_CONFIGS_DIR/$client_name.conf"
+        else
+            failed+=("$client_name")
+        fi
+    done < <(jq -r '.clients[]?.name' "$CLIENTS_JSON")
+
+    echo
+    echo "Server key rotated. Backup of the previous keys: $backup_dir"
+    echo "Old server public key: $old_public"
+    echo "New server public key: $new_public"
+    echo "On every client, set PublicKey in the [Peer] section to the new key,"
+    echo "or re-import its config or QR from $GENERATED_DIR."
+    if [ ${#failed[@]} -gt 0 ]; then
+        echo "Configs could not be rebuilt for: ${failed[*]}" >&2
+        return 1
+    fi
 }
 
 client_exists() {
@@ -585,21 +755,29 @@ run_remove_interactive() {
 }
 
 interactive_menu() {
-    local choice
+    local choice client answer
     echo "WadVPN client management"
     echo "  1) Add client"
     echo "  2) Remove client"
     echo "  3) List clients"
-    echo "  4) Manage groups"
-    echo "  5) Help"
+    echo "  4) Enable client"
+    echo "  5) Disable client"
+    echo "  6) Show client config and QR"
+    echo "  7) Manage groups"
+    echo "  8) Rotate server key"
+    echo "  9) Help"
     echo "  0) Exit"
     read -r -p "Select an action: " choice
     case "$choice" in
         1) run_add_interactive ;;
         2) run_remove_interactive ;;
         3) list_clients ;;
-        4) group_menu ;;
-        5) usage ;;
+        4) client=$(prompt_client) || return 1; set_client_enabled "$client" true ;;
+        5) client=$(prompt_client) || return 1; set_client_enabled "$client" false ;;
+        6) client=$(prompt_client) || return 1; show_client_config "$client" ;;
+        7) group_menu ;;
+        8) rotate_server_key false ;;
+        9) usage ;;
         0) ;;
         *) echo "Invalid selection." >&2; return 1 ;;
     esac
@@ -676,7 +854,22 @@ main() {
         add|create) parse_add "$@" ;;
         remove|delete) parse_remove "$@" ;;
         list) [ $# -eq 0 ] || { echo "list accepts no options." >&2; return 1; }; list_clients ;;
+        enable|disable)
+            [ $# -eq 1 ] || { echo "Usage: $command <client>" >&2; return 1; }
+            set_client_enabled "$1" "$([ "$command" = enable ] && echo true || echo false)"
+            ;;
+        show-config)
+            [ $# -eq 1 ] || { echo "Usage: show-config <client>" >&2; return 1; }
+            show_client_config "$1"
+            ;;
         group|groups) parse_group "$@" ;;
+        rotate-server-key)
+            case "${1:-}" in
+                "") rotate_server_key false ;;
+                --yes|-y) [ $# -eq 1 ] || { echo "Usage: rotate-server-key [--yes]" >&2; return 1; }; rotate_server_key true ;;
+                *) echo "Usage: rotate-server-key [--yes]" >&2; return 1 ;;
+            esac
+            ;;
         *) echo "Unknown command: $command" >&2; usage >&2; return 1 ;;
     esac
 }

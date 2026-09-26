@@ -13,11 +13,15 @@ OUTPUT="$PROJECT_DIR/config/$WADVPN_WG_INTERFACE.conf"
 SERVER_ADDRESS="$WADVPN_WG_ADDRESS"
 SERVER_PORT="$WADVPN_WG_LISTEN_PORT"
 
+# The server config contains the private key.
+umask 077
+
 cat > "$OUTPUT" <<EOF_CONF
 [Interface]
 Address = $SERVER_ADDRESS
 ListenPort = $SERVER_PORT
 PrivateKey = $SERVER_PRIVATE_KEY
+PostUp = $(printf '%q' "$INTERNAL_DIR/apply-routes.sh")
 
 EOF_CONF
 

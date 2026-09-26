@@ -28,6 +28,12 @@ check_wireguard() {
     else
         print_fail "WireGuard interface $WADVPN_WG_INTERFACE is missing"
     fi
+
+    if systemctl is-enabled --quiet wadvpn-firewall.service 2>/dev/null; then
+        print_ok "Firewall is restored at boot (wadvpn-firewall.service)"
+    else
+        print_fail "wadvpn-firewall.service is not enabled; rules are lost on reboot"
+    fi
 }
 
 check_forwarding() {
@@ -49,7 +55,7 @@ check_routes() {
     fi
 
     while IFS= read -r route; do
-        if ip route show "$route" >/dev/null 2>&1; then
+        if [ -n "$(ip route show "$route" 2>/dev/null)" ]; then
             print_ok "Route present: $route"
         else
             print_fail "Route missing: $route"

@@ -5,8 +5,16 @@
 
 CLIENTS_JSON="$PROJECT_DIR/config/clients.json"
 
+# Client names become directory and file names, so they must not contain "/"
+# or start with ".".
+CLIENT_NAME_PATTERN='^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$'
+
 # ipset names are limited to 31 characters and carry the "wadvpn-g-" prefix.
 GROUP_NAME_PATTERN='^[A-Za-z0-9_-]{1,22}$'
+
+valid_client_name() {
+    [[ "$1" =~ $CLIENT_NAME_PATTERN ]]
+}
 
 valid_group_name() {
     [[ "$1" =~ $GROUP_NAME_PATTERN ]]
@@ -19,6 +27,7 @@ update_clients_json() {
     tmp=$(mktemp "$CLIENTS_JSON.XXXXXX")
     if jq "$@" "$CLIENTS_JSON" > "$tmp" && jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
         chmod --reference="$CLIENTS_JSON" "$tmp"
+        chown --reference="$CLIENTS_JSON" "$tmp" 2>/dev/null || true
         mv "$tmp" "$CLIENTS_JSON"
     else
         rm -f "$tmp"

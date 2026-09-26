@@ -8,6 +8,7 @@ SCRIPTS_DIR="$(cd "$INTERNAL_DIR/.." && pwd)"
 source "$SCRIPTS_DIR/lib/config.sh"
 CONFIG_DIR="$PROJECT_DIR/config"
 PORT_FORWARDS_JSON="$CONFIG_DIR/port-forwards.json"
+CLIENTS_JSON="$CONFIG_DIR/clients.json"
 
 if [ "$EUID" -ne 0 ]; then
     echo "Run this script as root."
@@ -68,18 +69,6 @@ add_forward_rules() {
     fi
 }
 
-remove_forward_rules() {
-    local id="$1"
-    local target_address="$2"
-    local client_port="$3"
-    local external_port="$4"
-    local protocol="$5"
-
-    iptables -t nat -D PREROUTING -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j DNAT --to-destination "$target_address:$client_port" -m comment --comment "$id" 2>/dev/null || true
-    iptables -D INPUT -i "$INTERFACE" -p "$protocol" --dport "$external_port" -j ACCEPT -m comment --comment "$id" 2>/dev/null || true
-    iptables -D FORWARD -i "$INTERFACE" -o "$WG_INTERFACE" -p "$protocol" -d "$target_address" --dport "$client_port" -j ACCEPT -m comment --comment "$id" 2>/dev/null || true
-}
-
 main() {
     if [ ! -f "$PORT_FORWARDS_JSON" ]; then
         echo "Port forwards config not found: $PORT_FORWARDS_JSON"
@@ -99,15 +88,21 @@ main() {
         fi
     fi
 
-    while IFS=$'\t' read -r id target_address client_port external_port protocol; do
+    # Forwards store only the client name; the target defaults to the client's
+    # current VPN address, so address changes never leave stale rules behind.
+    while IFS=$'\t' read -r id client_name target_address client_port external_port protocol; do
         [ -n "$id" ] || continue
-        remove_forward_rules "$id" "$target_address" "$client_port" "$external_port" "$protocol"
-    done < <(jq -r '.port_forwards[]? | [.id, (.target_address // .client_address), (.client_port|tostring), (.external_port|tostring), .protocol] | @tsv' "$PORT_FORWARDS_JSON")
-
-    while IFS=$'\t' read -r id target_address client_port external_port protocol; do
-        [ -n "$id" ] || continue
+        if [ "$target_address" = "-" ]; then
+            echo "Skipping $id: client '$client_name' is missing or disabled." >&2
+            continue
+        fi
         add_forward_rules "$id" "$target_address" "$client_port" "$external_port" "$protocol"
-    done < <(jq -r '.port_forwards[]? | select(.id != null) | [.id, (.target_address // .client_address), (.client_port|tostring), (.external_port|tostring), .protocol] | @tsv' "$PORT_FORWARDS_JSON")
+    done < <(jq -r --slurpfile registry "$CLIENTS_JSON" '
+        ($registry[0].clients // []) as $clients
+        | .port_forwards[]? | select(.id != null and (.enabled != false)) | . as $forward
+        | ([$clients[] | select(.name == $forward.client_name and .enabled == true)][0]) as $client
+        | [.id, .client_name, (if $client then (.target_address // $client.address) else "-" end),
+           (.client_port|tostring), (.external_port|tostring), .protocol] | @tsv' "$PORT_FORWARDS_JSON")
 }
 
 main "$@"
