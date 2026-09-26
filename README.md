@@ -7,7 +7,7 @@ WadVPN is a self-hosted WireGuard VPN management project for automating server-s
 - Creates WireGuard clients automatically
 - Generates client config files and QR images
 - Applies routes and firewall rules
-- Supports protected/isolated clients
+- Supports protected clients and client groups (clients see each other only inside a shared group)
 - Manages per-client TCP/UDP port forwards
 - Verifies the resulting setup
 
@@ -18,6 +18,7 @@ WadVPN is a self-hosted WireGuard VPN management project for automating server-s
 - jq
 - qrencode
 - iptables
+- ipset
 
 ## Quick start
 
@@ -58,8 +59,11 @@ address allocator supports an IPv4 `/24` VPN network.
 
 ```bash
 sudo ./scripts/manage-clients.sh
-sudo ./scripts/manage-clients.sh add <client-name> [--protected] [--isolated] [--route <network>] [--ip <address>]
+sudo ./scripts/manage-clients.sh add <client-name> [--protected] [--group <group>]... [--route <network>] [--ip <address>]
 sudo ./scripts/manage-clients.sh remove <client-name> [--force] [--yes]
+sudo ./scripts/manage-clients.sh group list
+sudo ./scripts/manage-clients.sh group create|rename|delete ...
+sudo ./scripts/manage-clients.sh group add-client|remove-client|move-client ...
 sudo ./scripts/manage-clients.sh --help
 sudo ./scripts/manage-port-forward.sh list
 sudo ./scripts/manage-port-forward.sh add <client-name> --protocol <tcp|udp> --external-port <port> --target-port <port> [--target-address <ip>]
@@ -67,6 +71,21 @@ sudo ./scripts/manage-port-forward.sh remove
 sudo ./scripts/manage-port-forward.sh --help
 sudo ./scripts/verify.sh
 ```
+
+## Client groups
+
+VPN clients can reach each other only when they share at least one group. A
+client can belong to several groups and then reaches the members of each of
+them, while those groups stay separated from one another. A client without
+groups is isolated from all other VPN clients. Internet access, the server
+itself, and port forwards are not affected by groups.
+
+Groups are stored in `config/clients.json` (top-level `groups` list and a
+per-client `groups` list). `scripts/internal/apply-firewall.sh` turns every
+group into an ipset `wadvpn-g-<group>` containing the members' VPN addresses
+and routed networks, and the `WADVPN-C2C` iptables chain accepts traffic only
+when source and destination are in the same set. Membership changes only
+reload the firewall; WireGuard is not restarted.
 
 ## Project layout
 

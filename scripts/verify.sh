@@ -66,6 +66,21 @@ check_firewall() {
         print_fail "Forward rule for $WADVPN_WG_INTERFACE is missing"
     fi
 
+    if [ "$(iptables -S FORWARD | grep -m1 '^-A ')" = "-A FORWARD -i $WADVPN_WG_INTERFACE -o $WADVPN_WG_INTERFACE -j WADVPN-C2C" ]; then
+        print_ok "Client-to-client traffic is filtered by group (WADVPN-C2C)"
+    else
+        print_fail "Group filter WADVPN-C2C is not the first FORWARD rule"
+    fi
+
+    local group
+    while IFS= read -r group; do
+        if ipset list -n 2>/dev/null | grep -qx "wadvpn-g-$group"; then
+            print_ok "Group set exists: $group"
+        else
+            print_fail "Group set is missing: $group"
+        fi
+    done < <(jq -r '.groups[]?' "$PROJECT_DIR/config/clients.json")
+
     if iptables -t nat -C POSTROUTING -s "$WADVPN_VPN_NETWORK" -o "$interface" -j MASQUERADE >/dev/null 2>&1; then
         print_ok "MASQUERADE rule exists"
     else

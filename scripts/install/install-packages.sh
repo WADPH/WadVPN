@@ -9,6 +9,7 @@ PACKAGES=(
     wireguard-tools
     jq
     qrencode
+    ipset
 )
 
 MISSING=()
